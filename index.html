@@ -203,6 +203,14 @@ nav button{white-space:nowrap;flex-shrink:0}
 @media(max-width:380px){.mini-unit{min-height:88px}.mini-unit .card-art-frame{height:43px}.mini-unit strong{font-size:9px}}
 @media(prefers-reduced-motion:reduce){.mini-unit.cue-actor,.mini-unit.cue-target,.combat-card.cue-actor,.combat-card.cue-target,.effect-glyph,.scene-rune{animation:none!important}}
 
+/* Save backup and restore — 1.6 */
+.save-panel{margin-top:16px;border-color:#627d59;background:linear-gradient(140deg,#1c3124,#111d16)}.save-panel h2{font-size:24px}.save-panel>p{max-width:720px;font-size:12px;line-height:1.6}
+.save-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0}
+.save-actions button,.save-import-label{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 14px;border:1px solid #b6a871;border-radius:7px;font-size:12px;font-weight:bold;cursor:pointer}
+.save-import-label{background:#243b2a;color:#eee0ba}.save-actions input[type="file"]{max-width:100%;font-size:11px}
+.backup-status{padding:10px 12px;border-left:3px solid var(--gold);background:#23362a;color:#efddba}
+@media(max-width:700px){.save-actions{flex-direction:column;align-items:stretch}.save-actions button,.save-import-label,.save-actions input[type="file"]{width:100%}}
+
 </style></head><body><div id="app"></div><noscript>This offline game requires JavaScript.</noscript><script>
 (function(root) {
   'use strict';
@@ -802,13 +810,93 @@ else root.UnderrootPlanner=api;
 
 </script>
 <script>
+/* Underroot Kingdoms save backups. Browser-independent codec with strict validation.
+ * Stored save key remains collectible-rpg-underroot-v1 (version 1). */
+(function(root){
+'use strict';
+const KIND='underroot-kingdoms-save',FORMAT=1,STORAGE_KEY='collectible-rpg-underroot-v1';
+const fail=message=>{throw new Error(message)};
+function checksum(value){
+ const json=JSON.stringify(value);let h=2166136261;
+ for(let i=0;i<json.length;i++){h^=json.charCodeAt(i);h=Math.imul(h,16777619)}
+ return 'fnv1a-'+(h>>>0).toString(16).padStart(8,'0');
+}
+const object=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+function validate(save,data){
+ if(!object(save)||save.version!==1)fail('This is not a supported Underroot save.');
+ const cards=new Set(data.cards.map(c=>c.id)),
+   encounters=new Set(data.encounters.map(e=>e.id)),
+   missions=new Set(data.missions.flat().map(m=>m.id));
+ if(!Array.isArray(save.team)||save.team.length!==6||!save.team.every(id=>cards.has(id)))
+   fail('Backup has an invalid six-creature formation.');
+ if(save.owned!==undefined&&(!Array.isArray(save.owned)||!save.owned.every(id=>cards.has(id))))
+   fail('Backup contains an unknown owned creature.');
+ for(const field of ['seeds','essence','stage','encounter','mission']){
+   const value=save[field];
+   if(value!==undefined&&(!Number.isSafeInteger(value)||value<0))fail('Invalid saved '+field+'.');
+ }
+ if(save.stage!==undefined&&save.stage>=data.encounters.length)fail('Unknown saved chapter.');
+ if(save.encounter!==undefined&&save.encounter>=data.encounters.length)fail('Unknown saved trial.');
+ if(save.mission!==undefined&&save.mission>=3)fail('Unknown saved mission.');
+ for(const [field,allowed] of [['wins',encounters],['completed',encounters],['missionClears',missions]]){
+   if(save[field]!==undefined&&(!Array.isArray(save[field])||!save[field].every(id=>allowed.has(id))))
+     fail('Backup includes unknown '+field+' records.');
+ }
+ const bounds={levels:[1,20],stars:[1,3],ascensions:[1,3],fragments:[0,1000000]};
+ for(const [field,[low,high]] of Object.entries(bounds)){
+   if(save[field]===undefined)continue;
+   if(!object(save[field])||!Object.entries(save[field]).every(([id,n])=>
+     cards.has(id)&&Number.isSafeInteger(n)&&n>=low&&n<=high))
+     fail('Backup includes invalid '+field+'.');
+ }
+ if(save.equipment!==undefined&&(!object(save.equipment)||
+   !Object.entries(save.equipment).every(([id,r])=>cards.has(id)&&Object.prototype.hasOwnProperty.call(data.relics,r))))
+   fail('Backup includes unknown equipment.');
+ if(save.starterClaimed!==undefined&&typeof save.starterClaimed!=='boolean')
+   fail('Invalid starter reward record.');
+ return save;
+}
+function serialize(save,data,now=new Date().toISOString()){
+ validate(save,data);
+ return JSON.stringify({kind:KIND,format:FORMAT,storageKey:STORAGE_KEY,exportedAt:now,
+   checksum:checksum(save),snapshot:save},null,2);
+}
+function parse(text,data){
+ if(typeof text!=='string'||text.length>250000)fail('Backup is too large or unreadable.');
+ let input;try{input=JSON.parse(text)}catch{fail('Backup file is not valid JSON.')}
+ let snapshot;
+ if(input?.kind===KIND){
+   if(input.format!==FORMAT||input.storageKey!==STORAGE_KEY||!object(input.snapshot))
+     fail('This backup format is not supported.');
+   if(checksum(input.snapshot)!==input.checksum)fail('Backup checksum does not match. The file may be damaged.');
+   snapshot=input.snapshot;
+ }else if(input?.version===1&&!Object.prototype.hasOwnProperty.call(input,'kind')){
+   // Legacy raw saves are supported to make recovery possible from older manual exports.
+   snapshot=input;
+ }else fail('This is not an Underroot Kingdoms save file.');
+ validate(snapshot,data);
+ // Keep the full original snapshot intact; the existing game loader performs version-1 migrations.
+ return snapshot;
+}
+function summary(save,data){
+ const total=Array.isArray(save.owned)?new Set(save.owned).size:new Set(save.team).size;
+ return total+' creatures, '+(save.seeds||0)+' Seeds, '+(save.completed||[]).length+
+   ' of '+data.encounters.length+' chapters cleared';
+}
+const api={KIND,FORMAT,STORAGE_KEY,checksum,validate,serialize,parse,summary};
+if(typeof module!=='undefined'&&module.exports)module.exports=api;
+else root.UnderrootBackup=api;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+</script>
+<script>
 /* Presentation and local formation storage; battle rules live in combat.js. */
 (function(){
 'use strict';
 const D=UnderrootData,C=UnderrootCombat,catalog=Object.fromEntries(D.cards.map(c=>[c.id,c])),KEY='collectible-rpg-underroot-v1';
 let save={version:1,team:[...D.presets.harvest],wins:[],encounter:0,owned:[...new Set(D.presets.harvest)],levels:{},stars:{},seeds:0,completed:[],stage:0,equipment:{},fragments:{},essence:0,ascensions:{},starterClaimed:false,mission:0,missionClears:[]},storageError=false;
 try{const raw=JSON.parse(localStorage.getItem(KEY));if(raw?.version===1&&Array.isArray(raw.team)&&raw.team.length===6&&raw.team.every(id=>catalog[id]))save={version:1,team:raw.team,wins:Array.isArray(raw.wins)?raw.wins.filter(x=>D.encounters.some(e=>e.id===x)):[],encounter:Number.isInteger(raw.encounter)&&raw.encounter>=0&&raw.encounter<D.encounters.length?raw.encounter:0,owned:Array.isArray(raw.owned)?[...new Set([...raw.owned.filter(id=>catalog[id]),...raw.team])]:[...new Set(raw.team)],levels:raw.levels&&typeof raw.levels==='object'?Object.fromEntries(Object.entries(raw.levels).filter(([id,n])=>catalog[id]&&Number.isInteger(n)&&n>=1&&n<=20)): {},stars:raw.stars&&typeof raw.stars==='object'?Object.fromEntries(Object.entries(raw.stars).filter(([id,n])=>catalog[id]&&Number.isInteger(n)&&n>=1&&n<=3)):{},seeds:Number.isInteger(raw.seeds)&&raw.seeds>=0?raw.seeds:0,completed:Array.isArray(raw.completed)?raw.completed.filter(id=>D.encounters.some(e=>e.id===id)):[],stage:Number.isInteger(raw.stage)&&raw.stage>=0&&raw.stage<D.encounters.length?raw.stage:0,equipment:raw.equipment&&typeof raw.equipment==='object'?Object.fromEntries(Object.entries(raw.equipment).filter(([id,relic])=>catalog[id]&&D.relics[relic])):{},fragments:raw.fragments&&typeof raw.fragments==='object'?Object.fromEntries(Object.entries(raw.fragments).filter(([id,n])=>catalog[id]&&Number.isInteger(n)&&n>=0)):{},essence:Number.isInteger(raw.essence)&&raw.essence>=0?raw.essence:0,ascensions:raw.ascensions&&typeof raw.ascensions==='object'?Object.fromEntries(Object.entries(raw.ascensions).filter(([id,n])=>catalog[id]&&Number.isInteger(n)&&n>=1&&n<=3)):{},starterClaimed:raw.starterClaimed===true,mission:Number.isInteger(raw.mission)&&raw.mission>=0&&raw.mission<3?raw.mission:0,missionClears:Array.isArray(raw.missionClears)?[...new Set(raw.missionClears.filter(id=>D.missions.some(ms=>ms.some(m=>m.id===id))))]:D.missions.flatMap((ms,i)=>raw.completed?.includes(D.encounters[i].id)?ms.map(m=>m.id):[])};}catch{storageError=true;}
-let combatCue=null,autoSetNotice='',lastReward=null,collectionFilter='all',collectionOwnership='all',focusedCreature=null,campaignMode=false,cultivateChoice='',commanderChoice=false,battle=null,timer=null,selected=0,filter='all',tab='home',speed=650,resultSaved=false,battleEncounter=0,battleMission=0,targetChoice='';
+let saveNotice='',combatCue=null,autoSetNotice='',lastReward=null,collectionFilter='all',collectionOwnership='all',focusedCreature=null,campaignMode=false,cultivateChoice='',commanderChoice=false,battle=null,timer=null,selected=0,filter='all',tab='home',speed=650,resultSaved=false,battleEncounter=0,battleMission=0,targetChoice='';
 const app=document.getElementById('app');
 
 /* Estimated formation power: actual upgraded stats plus conditional faction synergy.
@@ -870,12 +958,30 @@ function strongestOwnedTeam(){
  choose([],0);
  return {team:arrangeTeam(best),power:bestPower};
 }
+function downloadBackup(){
+ const blob=new Blob([UnderrootBackup.serialize(save,D)],{type:'application/json;charset=utf-8'});
+ const url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download='underroot-kingdoms-save-'+new Date().toISOString().slice(0,10)+'.json';
+ document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);
+ saveNotice='Backup exported. Store the JSON file somewhere safe.';
+}
+async function restoreBackup(file){
+ if(!file)return;
+ try{
+  if(file.size>250000)throw Error('The backup file is too large');
+  const snapshot=UnderrootBackup.parse(await file.text(),D);
+  const details=UnderrootBackup.summary(snapshot,D);
+  const approved=window.confirm('Restore Underroot Kingdoms save?\n\n'+details+'\n\nThis replaces ALL progress in this browser. Continue?');
+  if(!approved){saveNotice='Import cancelled. Existing progress is unchanged.';render();return;}
+  localStorage.setItem(KEY,JSON.stringify(snapshot));window.location.reload();
+ }catch(err){saveNotice='Import failed: '+String(err?.message||'Could not read file')+'. Existing progress was not changed.';render();}
+}
 function persist(){try{localStorage.setItem(KEY,JSON.stringify(save));storageError=false;}catch{storageError=true;}}
 const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 /* Dedicated hand-authored portrait scenes live in portraits.js. */
 function art(c,small=false){return UnderrootPortraits.render(c,small);}
 function cardFrame(c,small=false){const rarity=D.rarityOf(c.id),faction=D.factions[c.faction];return `<div class="card-art-frame rarity-${rarity}" style="--faction:${faction?.color||'#aab'}"><span class="card-corner">${rarity.toUpperCase()}</span><span class="card-number">№ ${String(D.cards.findIndex(item=>item.id===c.id)+1).padStart(2,'0')}</span>${art(c,small)}<span class="card-element">${escape(faction?.name||'Wanderer')}</span></div>`;}
-function header(){return `<header><a class="wordmark" href="#" data-action="tab" data-value="formation"><span class="sigil">✧</span><span>UNDERROOT <b>KINGDOMS</b></span></a><span class="edition">THE FIRST GARDEN <em>mobile playtest 1.5.1</em></span></header><nav aria-label="Main navigation">${[['home','Garden'],['formation','Formation'],['campaign','Campaign'],['collection','Collection'],['battle','Battle'],['codex','Field guide']].map(([id,label])=>`<button data-action="tab" data-value="${id}" class="${tab===id?'active':''}">${label}</button>`).join('')}<span>${save.seeds} seeds · ${save.completed.length} / ${D.encounters.length} campaign clears</span></nav>`;}
+function header(){return `<header><a class="wordmark" href="#" data-action="tab" data-value="formation"><span class="sigil">✧</span><span>UNDERROOT <b>KINGDOMS</b></span></a><span class="edition">THE FIRST GARDEN <em>mobile playtest 1.6</em></span></header><nav aria-label="Main navigation">${[['home','Garden'],['formation','Formation'],['campaign','Campaign'],['collection','Collection'],['battle','Battle'],['codex','Field guide']].map(([id,label])=>`<button data-action="tab" data-value="${id}" class="${tab===id?'active':''}">${label}</button>`).join('')}<span>${save.seeds} seeds · ${save.completed.length} / ${D.encounters.length} campaign clears</span></nav>`;}
 function homeView(){
  const stage=Math.min(save.stage,D.encounters.length-1),chapter=D.chapters[stage],encounter=D.encounters[stage],mission=D.missions[stage][save.mission];
  const nextCost=(save.levels[save.team[0]]||1)*20;
@@ -904,7 +1010,14 @@ function homeView(){
  ${!save.starterClaimed?'<button class="primary" data-action="starter">Claim your 90 free starter Seeds</button>':''}
  <button class="primary" data-action="tab" data-value="collection">Explore your collection →</button>
  <p class="hint">Even defeats earn training Seeds and a creature fragment.</p></section>
- </div></section>`;
+ </div>
+ <section class="panel save-panel" aria-label="Save backup and restore">
+ <div class="section-heading"><div><p class="eyebrow">PROTECT YOUR GARDEN</p><h2>Save backup</h2></div><span class="tag">OFFLINE</span></div>
+ <p>Your progress lives in this browser. Export a backup to protect creatures, Seeds, upgrades, relics and campaign progress.</p>
+ <div class="save-actions"><button class="primary" data-action="backup-export">↓ Export Save (.json)</button><label for="backup-import-file" class="save-import-label">↑ Import Backup</label><input id="backup-import-file" type="file" accept=".json,application/json" aria-label="Select Underroot backup"/></div>
+ <p class="hint">Import replaces progress on this device after confirmation. Keep your exported file safe.</p>
+ ${saveNotice?`<p class="backup-status" role="status">${escape(saveNotice)}</p>`:''}
+ </section></section>`;
 }
 function progression(){
  const stage=save.stage,chapter=D.chapters[stage],enc=D.encounters[stage],cleared=save.completed.length,missions=D.missions[stage],selectedMission=missions[save.mission],missionCleared=missions.filter(m=>save.missionClears.includes(m.id)).length;
@@ -1052,6 +1165,7 @@ function finish(){
 function step(choice={}){const previous=battle?.units.map(u=>[u.uid,u.hp])||[],eventStart=battle?.events.length||0;const actor=battle?.nextActor();if(!timer&&actor?.side===0&&cultivateChoice){const [kind,target]=cultivateChoice.split(':');choice.cultivate={kind,target:target||undefined};}if(!timer&&actor?.side===0&&targetChoice&&battle.legalTargets(actor).some(u=>u.uid===targetChoice))choice.target=targetChoice;battle?.step(choice);const before=new Map(previous),events=battle?battle.events.slice(eventStart):[],priorities=['overtake','shatter','death','revive','ring','heal','hit','rot','cultivate','compost','visit','season'],highlight=priorities.map(type=>events.find(e=>e.type===type)).find(Boolean)||events.at(-1);combatCue={tone:highlight?.type||'normal',text:highlight?.text||'The garden stirs.',actor:actor?.uid||events.find(e=>e.actor)?.actor||null,targets:[...new Set(events.map(e=>e.target).filter(Boolean).concat(battle?battle.units.filter(u=>before.has(u.uid)&&before.get(u.uid)!==u.hp).map(u=>u.uid):[]))],changes:battle?battle.units.filter(u=>before.has(u.uid)&&before.get(u.uid)!==u.hp).map(u=>({uid:u.uid,delta:u.hp-before.get(u.uid)})):[]};targetChoice='';cultivateChoice='';finish();render();}
 function start(campaign=false){stop();lastReward=null;combatCue=null;targetChoice='';cultivateChoice='';campaignMode=campaign;battleEncounter=campaign?save.stage:save.encounter;battleMission=campaign?save.mission:2;if(campaign&&save.team.some(id=>!save.owned.includes(id)))return;battle=campaign?UnderrootPlanner.createCampaignBattle(D,C,save.team,save,battleEncounter,battleMission,commanderChoice):new C.Battle(D.cards,[save.team,D.encounters[battleEncounter].team],{commanders:[commanderChoice,false]});tab='battle';resultSaved=false;render();}
 app.addEventListener('click',e=>{const button=e.target.closest('[data-action]');if(!button||button.disabled)return;e.preventDefault();const {action,value}=button.dataset;
+if(action==='backup-export'){try{downloadBackup();}catch(err){saveNotice='Export failed: '+String(err?.message||'Unable to save');}render();return;}
 if(action==='tab'){stop();tab=value;}
 if(action==='bed')selected=Number(value);
 if(action==='auto-set'){
@@ -1092,7 +1206,7 @@ if(action==='edit'){stop();tab='formation';}
 if(action==='auto'){if(timer)stop();else if(battle&&!battle.result)timer=setInterval(()=>step(),speed);}
 render();
 });
-app.addEventListener('change',e=>{if(e.target.id==='target'){targetChoice=e.target.value;render();}if(e.target.id==='cultivate')cultivateChoice=e.target.value;if(e.target.dataset?.equip){const id=e.target.dataset.equip,relic=e.target.value;const earned=save.completed.some(stage=>D.chapters[D.encounters.findIndex(e=>e.id===stage)]?.relic===relic);if(save.owned.includes(id)&&(!relic||earned)){if(relic)save.equipment[id]=relic;else delete save.equipment[id];persist();render();}}if(e.target.id==='preset'&&D.presets[e.target.value]){save.team=[...D.presets[e.target.value]];persist();render();}if(e.target.id==='speed'){speed=Number(e.target.value);if(timer){stop();timer=setInterval(()=>step(),speed);}render();}});
+app.addEventListener('change',async e=>{if(e.target.id==='backup-import-file'){await restoreBackup(e.target.files?.[0]);return;}if(e.target.id==='target'){targetChoice=e.target.value;render();}if(e.target.id==='cultivate')cultivateChoice=e.target.value;if(e.target.dataset?.equip){const id=e.target.dataset.equip,relic=e.target.value;const earned=save.completed.some(stage=>D.chapters[D.encounters.findIndex(e=>e.id===stage)]?.relic===relic);if(save.owned.includes(id)&&(!relic||earned)){if(relic)save.equipment[id]=relic;else delete save.equipment[id];persist();render();}}if(e.target.id==='preset'&&D.presets[e.target.value]){save.team=[...D.presets[e.target.value]];persist();render();}if(e.target.id==='speed'){speed=Number(e.target.value);if(timer){stop();timer=setInterval(()=>step(),speed);}render();}});
 render();
 })();
 
